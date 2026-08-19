@@ -1,59 +1,47 @@
+const rubricItem = { type: "object", additionalProperties: false, required: ["id", "title", "score", "maxScore", "evidence", "coaching"], properties: { id: { type: "string" }, title: { type: "string" }, score: { type: "integer", minimum: 0 }, maxScore: { type: "integer", minimum: 1 }, evidence: { type: "string" }, coaching: { type: "string" } } };
 const evaluationSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["overallSummary", "strongestSignal", "topImprovement", "deliveryScore", "productScore", "deliveryEvidence", "productEvidence", "improvedExample"],
+  type: "object", additionalProperties: false,
+  required: ["overallSummary", "strongestSignal", "topImprovement", "deliveryScore", "productScore", "productSections", "deliverySections", "grammar", "fillers", "pronunciation", "weaknesses", "nextPracticePlan", "improvedExample"],
   properties: {
-    overallSummary: { type: "string" },
-    strongestSignal: { type: "string" },
-    topImprovement: { type: "string" },
-    deliveryScore: { type: "integer", minimum: 0, maximum: 100 },
-    productScore: { type: "integer", minimum: 0, maximum: 100 },
-    deliveryEvidence: {
-      type: "array", minItems: 3, maxItems: 5,
-      items: { type: "object", additionalProperties: false, required: ["title", "evidence", "coaching"], properties: { title: { type: "string" }, evidence: { type: "string" }, coaching: { type: "string" } } },
-    },
-    productEvidence: {
-      type: "array", minItems: 3, maxItems: 5,
-      items: { type: "object", additionalProperties: false, required: ["title", "evidence", "coaching"], properties: { title: { type: "string" }, evidence: { type: "string" }, coaching: { type: "string" } } },
-    },
-    improvedExample: { type: "string" },
+    overallSummary: { type: "string" }, strongestSignal: { type: "string" }, topImprovement: { type: "string" }, deliveryScore: { type: "integer", minimum: 0, maximum: 100 }, productScore: { type: "integer", minimum: 0, maximum: 100 },
+    productSections: { type: "array", minItems: 5, maxItems: 5, items: rubricItem }, deliverySections: { type: "array", minItems: 6, maxItems: 6, items: rubricItem },
+    grammar: { type: "object", additionalProperties: false, required: ["errorCount", "summary", "patterns"], properties: { errorCount: { type: "integer", minimum: 0 }, summary: { type: "string" }, patterns: { type: "array", maxItems: 5, items: { type: "object", additionalProperties: false, required: ["category", "count", "example", "correction"], properties: { category: { type: "string" }, count: { type: "integer", minimum: 1 }, example: { type: "string" }, correction: { type: "string" } } } } } },
+    fillers: { type: "object", additionalProperties: false, required: ["total", "perMinute", "summary", "items"], properties: { total: { type: "integer", minimum: 0 }, perMinute: { type: "number", minimum: 0 }, summary: { type: "string" }, items: { type: "array", maxItems: 8, items: { type: "object", additionalProperties: false, required: ["phrase", "count"], properties: { phrase: { type: "string" }, count: { type: "integer", minimum: 1 } } } } } },
+    pronunciation: { type: "object", additionalProperties: false, required: ["confidence", "summary", "patterns"], properties: { confidence: { type: "string", enum: ["high", "medium", "low", "unavailable"] }, summary: { type: "string" }, patterns: { type: "array", maxItems: 5, items: { type: "object", additionalProperties: false, required: ["word", "observation", "practice"], properties: { word: { type: "string" }, observation: { type: "string" }, practice: { type: "string" } } } } } },
+    weaknesses: { type: "array", minItems: 2, maxItems: 5, items: { type: "object", additionalProperties: false, required: ["tag", "label", "evidence", "recommendation"], properties: { tag: { type: "string" }, label: { type: "string" }, evidence: { type: "string" }, recommendation: { type: "string" } } } },
+    nextPracticePlan: { type: "array", minItems: 3, maxItems: 5, items: { type: "string" } }, improvedExample: { type: "string" },
   },
 };
+function transcriptText(entries: Array<{ speaker: string; text: string; at: number }> = []) { return entries.map((entry) => `[${entry.at}s] ${entry.speaker}: ${entry.text}`).join("\n"); }
 
 export async function POST(request: Request) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return Response.json({ available: false }, { status: 503 });
+  const form = await request.formData();
+  const session = JSON.parse(String(form.get("session") || "{}"));
+  const audio = form.get("audio");
+  let audioObservation = "No usable recording was supplied. Pronunciation confidence must be unavailable; do not invent pronunciation issues.";
+  if (audio instanceof File && audio.size > 0) {
+    try {
+      const tf = new FormData(); tf.set("file", audio, audio.name || "interview.webm"); tf.set("model", "gpt-4o-transcribe"); tf.set("prompt", "Transcribe faithfully in US English. Preserve filler words, false starts, repeated phrases, and grammatical errors. Do not silently correct the speaker.");
+      const tr = await fetch("https://api.openai.com/v1/audio/transcriptions", { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: tf });
+      const td = await tr.json();
+      if (tr.ok && td.text) audioObservation = `Audio-derived transcript (use for delivery, fillers, grammar, and conservative intelligibility observations):\n${td.text}`;
+    } catch { /* fall back to browser transcript */ }
+  }
+  const prior = Array.isArray(session.history) && session.history.length ? session.history.map((item: { date: string; weaknesses: string[]; productScore: number; deliveryScore: number }) => `${item.date}: Product ${item.productScore}, Delivery ${item.deliveryScore}; ${item.weaknesses.join(", ")}`).join("\n") : "No prior sessions yet.";
+  const input = `Evaluate this Product Sense mock interview for a Senior/Lead PM.
+QUESTION: ${session.question}\nSTYLE: ${session.style}\nDURATION: ${session.durationSeconds} seconds\nPACE: ${session.pace} words/minute\nFOLLOW-UPS: ${session.followUpCount}
+WORKING NOTES (supporting evidence, not a writing contest):\n${session.notes || "No notes"}
+BROWSER TRANSCRIPT:\n${transcriptText(session.transcript)}
+${audioObservation}
+PRIOR LOCAL HISTORY (use only to label recurring weaknesses; score this session independently):\n${prior}
 
-  const session = await request.json();
-  const input = `Evaluate this Product Sense mock interview.
-
-Question: ${session.question}
-Style: ${session.style}
-Duration seconds: ${session.durationSeconds}
-Approximate speaking pace: ${session.pace} words per minute
-Detected filler count: ${session.fillerCount}
-Follow-ups completed: ${session.followUpCount}
-
-Shared working notes (assess whether they made the candidate's thinking easier to follow; treat note-taking as supporting evidence for structure, prioritization, and interview communication—not as a separate writing contest):
-${session.notes || "No notes"}
-
-Transcript:
-${(session.transcript || []).map((entry: { speaker: string; text: string; at: number }) => `[${entry.at}s] ${entry.speaker}: ${entry.text}`).join("\n")}
-
-Score Delivery and Product Thinking independently and equally. Be evidence-based, direct, and calibrated for a Senior/Lead PM interview. Delivery includes structure, signposting, concision, pacing, composure, verbal clarity, and interaction. Product Thinking includes objective, user choice, problem depth, prioritization, solutions, trade-offs, metrics, and adaptation. Do not infer emotion, personality, or competence from accent. If transcript evidence is limited, say so and lower confidence rather than inventing evidence. The improved example must preserve the candidate's ideas while making the delivery more concise and confident.`;
-
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "gpt-5.6",
-      store: false,
-      instructions: "You are a rigorous Product Management interview evaluator. Produce concise, actionable feedback grounded only in the supplied session evidence.",
-      input,
-      text: { format: { type: "json_schema", name: "interview_evaluation", strict: true, schema: evaluationSchema } },
-    }),
-  });
-
+SCORING — exactly 50/50 overall:
+PRODUCT SENSE (50 raw points): product_motivation 8; segmentation 12; problem_identification 13; solution_development 13; synthesis_judgment 4. Normalize to productScore /100. Reward user/business motivation, behavior-based segmentation, specific prioritized problems, solution breadth and prioritization, credible V1, trade-offs, metrics, risks, GTM, synthesis, and adaptation. Core floor: if any of motivation, segmentation, problem identification, or solution development is below 60% of its max, productScore cannot exceed 69.
+DELIVERY & LANGUAGE (50 raw points): structure_waypointing 12; clarity_executive_communication 10; conversational_fluency 8; grammar 8; fillers_verbal_habits 6; pronunciation_intelligibility 6. Normalize to deliveryScore /100. Reward decision-first answers, signposting, concise logic, calm pauses, natural transitions, and collaborative interaction. Evaluate intelligibility, not accent conformity. Never penalize a non-native accent. Only name pronunciation issues when audio evidence supports a repeated or clear intelligibility problem; otherwise state insufficient evidence. Grammar patterns require short exact examples and corrections. Count fillers from audio-derived text when available.
+Every rubric item must use the exact IDs and max scores above. Evidence must identify something actually said or written. Weakness tags must be stable snake_case labels. Give a focused next-session plan.`;
+  const response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: "gpt-5.6", store: false, instructions: "You are a rigorous, fair Product Management interviewer and language coach. Ground every judgment in evidence and obey the scoring arithmetic.", input, text: { format: { type: "json_schema", name: "interview_evaluation", strict: true, schema: evaluationSchema } } }) });
   const data = await response.json();
   if (!response.ok) return Response.json({ error: data?.error?.message || "Evaluation failed" }, { status: response.status });
   const outputText = data.output?.flatMap((item: { content?: Array<{ type: string; text?: string }> }) => item.content || []).find((part: { type: string }) => part.type === "output_text")?.text;

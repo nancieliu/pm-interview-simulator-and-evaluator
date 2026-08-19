@@ -6,9 +6,12 @@ type Stage = "setup" | "interview" | "report";
 type Style = "General Lead PM" | "Meta-style";
 type InterviewerId = "alex" | "maya";
 type TranscriptEntry = { speaker: "Interviewer" | "You"; text: string; at: number };
-type Evaluation = { overallSummary: string; strongestSignal: string; topImprovement: string; deliveryScore: number; productScore: number; deliveryEvidence: Array<{ title: string; evidence: string; coaching: string }>; productEvidence: Array<{ title: string; evidence: string; coaching: string }>; improvedExample: string };
+type RubricItem = { id: string; title: string; score: number; maxScore: number; evidence: string; coaching: string };
+type Evaluation = { overallSummary: string; strongestSignal: string; topImprovement: string; deliveryScore: number; productScore: number; productSections: RubricItem[]; deliverySections: RubricItem[]; grammar: { errorCount: number; summary: string; patterns: Array<{ category: string; count: number; example: string; correction: string }> }; fillers: { total: number; perMinute: number; summary: string; items: Array<{ phrase: string; count: number }> }; pronunciation: { confidence: string; summary: string; patterns: Array<{ word: string; observation: string; practice: string }> }; weaknesses: Array<{ tag: string; label: string; evidence: string; recommendation: string }>; nextPracticePlan: string[]; improvedExample: string };
+type SessionHistory = { date: string; productScore: number; deliveryScore: number; weaknesses: string[] };
 
 const SESSION_SECONDS = 35 * 60;
+const HISTORY_KEY = "presence-evaluation-history-v1";
 const QUESTIONS: Record<Style, string[]> = {
   "General Lead PM": [
     "Design a product that helps people make better use of their free time.",
@@ -72,6 +75,8 @@ export default function Home() {
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const recordedAudioRef = useRef<Blob | null>(null);
+  const recorderStoppedRef = useRef<Promise<Blob> | null>(null);
   const recognitionRef = useRef<any>(null);
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
@@ -212,7 +217,7 @@ export default function Home() {
   async function startInterview() {
     const actual = questionMode === "random" ? QUESTIONS[style][Math.floor(Math.random() * QUESTIONS[style].length)] : customQuestion.trim();
     if (!actual) return;
-    setQuestion(actual); setTranscript([]); setSecondsLeft(SESSION_SECONDS); setFollowUpIndex(0); setAudioUrl(null); setStartedAt(Date.now()); setEndedAt(null); setEvaluation(null); setEvaluationMessage(""); setConnectionError(""); lastSyncedNotesRef.current = ""; realtimeResponseCountRef.current = 0;
+    setQuestion(actual); setTranscript([]); setSecondsLeft(SESSION_SECONDS); setFollowUpIndex(0); setAudioUrl(null); setStartedAt(Date.now()); setEndedAt(null); setEvaluation(null); setEvaluationMessage(""); setConnectionError(""); recordedAudioRef.current = null; recorderStoppedRef.current = null; lastSyncedNotesRef.current = ""; realtimeResponseCountRef.current = 0;
     setStage("interview");
     let mediaStream: MediaStream | null = null;
     try {
@@ -223,7 +228,7 @@ export default function Home() {
       const recorder = new MediaRecorder(new MediaStream(stream.getAudioTracks()));
       chunksRef.current = [];
       recorder.ondataavailable = (event) => { if (event.data.size) chunksRef.current.push(event.data); };
-      recorder.onstop = () => setAudioUrl(URL.createObjectURL(new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" })));
+      recorderStoppedRef.current = new Promise((resolve) => { recorder.onstop = () => { const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" }); recordedAudioRef.current = blob; setAudioUrl(URL.createObjectURL(blob)); resolve(blob); }; });
       recorder.start(1000); recorderRef.current = recorder;
       setDeviceMessage("Audio recording active · Video is not recorded");
     } catch { setCameraOn(false); setDeviceMessage("Camera or microphone access was blocked."); setConnectionError("Presence needs microphone access for the live interviewer. Allow microphone access in your browser, then start a new interview."); }
@@ -243,27 +248,39 @@ export default function Home() {
     const next = !cameraOn; setCameraOn(next);
     streamRef.current?.getVideoTracks().forEach((track) => { track.enabled = next; });
   }
-  async function requestEvaluation(duration: number) {
+  function getHistory(): SessionHistory[] {
+    try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]").slice(-10); } catch { return []; }
+  }
+  function saveHistory(result: Evaluation) {
+    const next = [...getHistory(), { date: new Date().toISOString().slice(0, 10), productScore: result.productScore, deliveryScore: result.deliveryScore, weaknesses: result.weaknesses.map((item) => item.tag) }].slice(-10);
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+  }
+  async function requestEvaluation(duration: number, audioBlob: Blob | null) {
     const capturedText = transcript.filter((entry) => entry.speaker === "You").map((entry) => entry.text).join(" ");
     const capturedWords = capturedText.trim() ? capturedText.trim().split(/\s+/).length : 0;
     const measuredPace = Math.round(capturedWords / Math.max(duration / 60, .1));
     setEvaluating(true); setEvaluationMessage("Reviewing your interview evidence…");
     try {
-      const response = await fetch("/api/evaluate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: selectedQuestion, style, durationSeconds: duration, pace: measuredPace, fillerCount: countFillers(capturedText), followUpCount: followUpIndex, notes, transcript }) });
+      const form = new FormData();
+      form.set("session", JSON.stringify({ question: selectedQuestion, style, durationSeconds: duration, pace: measuredPace, fillerCount: countFillers(capturedText), followUpCount: followUpIndex, notes, transcript, history: getHistory() }));
+      if (audioBlob?.size) form.set("audio", audioBlob, `presence-interview.${audioBlob.type.includes("mp4") ? "m4a" : "webm"}`);
+      const response = await fetch("/api/evaluate", { method: "POST", body: form });
       if (!response.ok) throw new Error("Evaluation unavailable");
       const result = await response.json();
-      setEvaluation(result.evaluation); setEvaluationMessage("");
+      setEvaluation(result.evaluation); saveHistory(result.evaluation); setEvaluationMessage("");
     } catch { setEvaluationMessage("AI evaluation was unavailable. Showing local delivery signals instead."); }
     finally { setEvaluating(false); }
   }
-  function finishInterview() {
+  async function finishInterview() {
     const now = Date.now();
     const duration = startedAt ? Math.max(1, Math.round((now - startedAt) / 1000)) : 1;
     setEndedAt(now);
     if (recorderRef.current && recorderRef.current.state !== "inactive") recorderRef.current.stop();
     recognitionRef.current?.stop?.();
     window.speechSynthesis?.cancel(); streamRef.current?.getTracks().forEach((track) => track.stop()); setStage("report");
-    peerRef.current?.close(); setAiConnected(false); void requestEvaluation(duration);
+    peerRef.current?.close(); setAiConnected(false);
+    const audioBlob = recorderStoppedRef.current ? await recorderStoppedRef.current : recordedAudioRef.current;
+    void requestEvaluation(duration, audioBlob);
   }
 
   const userText = transcript.filter((entry) => entry.speaker === "You").map((entry) => entry.text).join(" ");
@@ -289,7 +306,7 @@ export default function Home() {
           <label>Question</label><div className="segmented compact"><button className={questionMode === "random" ? "active" : ""} onClick={() => setQuestionMode("random")}>Surprise me</button><button className={questionMode === "custom" ? "active" : ""} onClick={() => setQuestionMode("custom")}>Use my question</button></div>
           {questionMode === "custom" ? <textarea className="question-input" value={customQuestion} onChange={(e) => setCustomQuestion(e.target.value)} placeholder="Paste the exact Product Sense question…" /> : <div className="question-preview"><span>Randomized at the start</span><p>{QUESTIONS[style][0]}</p></div>}
           <div className="device-row"><div className="device-icons"><span>◉</span><span>⌁</span></div><div><b>Camera + microphone</b><span>{deviceMessage}</span></div></div>
-          <button className="primary-button" onClick={startInterview} disabled={questionMode === "custom" && !customQuestion.trim()}>Join interview <span>→</span></button><p className="consent-copy">By joining, you consent to local audio recording for your private review.</p>
+          <button className="primary-button" onClick={startInterview} disabled={questionMode === "custom" && !customQuestion.trim()}>Join interview <span>→</span></button><p className="consent-copy">By joining, you consent to audio recording and OpenAI analysis for your private report. Video is never recorded.</p>
         </div>
       </section>
     </main>
@@ -321,7 +338,9 @@ export default function Home() {
           <section className="report-card metrics-card"><div className="card-title-row"><div><span className="card-kicker">Delivery signals</span><h2>How you sounded</h2></div>{audioUrl && <audio controls src={audioUrl} />}</div><div className="metric-grid"><div><strong>{pace || "—"}</strong><span>words / min</span><small>{pace >= 110 && pace <= 165 ? "Steady pace" : "Aim for 110–165"}</small></div><div><strong>{fillerCount}</strong><span>filler words</span><small>{fillerCount <= 4 ? "Controlled" : "Replace with pauses"}</small></div><div><strong>{wordCount}</strong><span>words captured</span><small>Across {formatTime(elapsedSeconds)}</small></div><div><strong>{followUpIndex}</strong><span>follow-ups</span><small>Answered in session</small></div></div></section>
           <section className="report-card notes-review"><span className="card-kicker">Your working document</span><h2>Structure you shared</h2><pre>{notes || "No working notes were captured in this session."}</pre></section>
           <section className="report-card transcript-card"><span className="card-kicker">Session evidence</span><h2>Transcript</h2><div className="transcript-list">{transcript.length ? transcript.map((entry, index) => <div key={`${entry.at}-${index}`} className={entry.speaker === "You" ? "user-entry" : "interviewer-entry"}><span>{formatTime(entry.at)}</span><div><b>{entry.speaker}</b><p>{entry.text}</p></div></div>) : <p className="empty-copy">No transcript was available. Your audio recording may still be played above.</p>}</div></section>
-          {evaluation && <section className="report-card evidence-card"><span className="card-kicker">AI evidence</span><h2>Delivery and product thinking</h2><div className="evidence-columns"><div><h3>Delivery</h3>{evaluation.deliveryEvidence.map((item) => <article key={item.title}><b>{item.title}</b><p>{item.evidence}</p><small>{item.coaching}</small></article>)}</div><div><h3>Product thinking</h3>{evaluation.productEvidence.map((item) => <article key={item.title}><b>{item.title}</b><p>{item.evidence}</p><small>{item.coaching}</small></article>)}</div></div></section>}
+          {evaluation && <><section className="report-card evidence-card"><span className="card-kicker">Rubric evidence</span><h2>How the judge scored you</h2><div className="evidence-columns"><div><h3>Delivery & language · 50%</h3>{evaluation.deliverySections.map((item) => <article key={item.id}><div className="rubric-line"><b>{item.title}</b><strong>{item.score}/{item.maxScore}</strong></div><p>{item.evidence}</p><small>{item.coaching}</small></article>)}</div><div><h3>Product Sense · 50%</h3>{evaluation.productSections.map((item) => <article key={item.id}><div className="rubric-line"><b>{item.title}</b><strong>{item.score}/{item.maxScore}</strong></div><p>{item.evidence}</p><small>{item.coaching}</small></article>)}</div></div></section>
+          <section className="report-card language-card"><span className="card-kicker">Language coach</span><h2>Patterns to practice</h2><div className="language-grid"><div><h3>Grammar · {evaluation.grammar.errorCount} captured</h3><p>{evaluation.grammar.summary}</p>{evaluation.grammar.patterns.map((item) => <article key={item.category}><b>{item.category} · {item.count}×</b><p>“{item.example}” → “{item.correction}”</p></article>)}</div><div><h3>Fillers · {evaluation.fillers.total} total</h3><p>{evaluation.fillers.summary}</p>{evaluation.fillers.items.map((item) => <span className="pattern-chip" key={item.phrase}>{item.phrase} · {item.count}</span>)}</div><div><h3>Pronunciation · {evaluation.pronunciation.confidence} confidence</h3><p>{evaluation.pronunciation.summary}</p>{evaluation.pronunciation.patterns.map((item) => <article key={item.word}><b>{item.word}</b><p>{item.observation}</p><small>{item.practice}</small></article>)}</div></div></section>
+          <section className="report-card trend-card"><span className="card-kicker">Your development over time</span><h2>Weakness areas to watch</h2><div className="weakness-list">{evaluation.weaknesses.map((item) => <article key={item.tag}><b>{item.label}</b><p>{item.evidence}</p><small>{item.recommendation}</small></article>)}</div><div className="practice-plan"><h3>Next session plan</h3><ol>{evaluation.nextPracticePlan.map((step) => <li key={step}>{step}</li>)}</ol></div></section></>}
         </div>
         <div className="report-actions"><button className="secondary-button" onClick={() => setStage("setup")}>Choose another question</button><button className="primary-button" onClick={() => { setStage("setup"); setCustomQuestion(selectedQuestion); setQuestionMode("custom"); }}>Retry this question <span>→</span></button></div>
       </section>
