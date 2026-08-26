@@ -81,6 +81,7 @@ export default function Home() {
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [evaluating, setEvaluating] = useState(false);
   const [evaluationMessage, setEvaluationMessage] = useState("");
+  const [lastEvaluationDuration, setLastEvaluationDuration] = useState(0);
   const [testMode, setTestMode] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -112,7 +113,7 @@ export default function Home() {
     if (noteSyncTimerRef.current) clearTimeout(noteSyncTimerRef.current);
     noteSyncTimerRef.current = setTimeout(() => {
       const channel = dataChannelRef.current;
-      if (!channel || channel.readyState !== "open") return;
+      if (!channel || channel.readyState !== "open" || interviewerSpeaking) return;
       channel.send(JSON.stringify({
         type: "conversation.item.create",
         item: {
@@ -125,9 +126,9 @@ export default function Home() {
         },
       }));
       lastSyncedNotesRef.current = notes;
-    }, 700);
+    }, 2500);
     return () => { if (noteSyncTimerRef.current) clearTimeout(noteSyncTimerRef.current); };
-  }, [aiConnected, notes, stage]);
+  }, [aiConnected, interviewerSpeaking, notes, stage]);
   useEffect(() => () => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     recognitionRef.current?.stop?.();
@@ -274,20 +275,22 @@ export default function Home() {
     localStorage.removeItem(LEGACY_HISTORY_KEY);
     window.alert("Saved practice history cleared.");
   }
-  async function requestEvaluation(duration: number, audioBlob: Blob | null) {
+  async function requestEvaluation(duration: number) {
     const capturedText = transcript.filter((entry) => entry.speaker === "You").map((entry) => entry.text).join(" ");
     const capturedWords = capturedText.trim() ? capturedText.trim().split(/\s+/).length : 0;
     const measuredPace = Math.round(capturedWords / Math.max(duration / 60, .1));
-    setEvaluating(true); setEvaluationMessage("Reviewing your interview evidence…");
+    setLastEvaluationDuration(duration); setEvaluating(true); setEvaluationMessage("Reviewing your interview evidence…");
     try {
       const form = new FormData();
       form.set("session", JSON.stringify({ question: selectedQuestion, style, testMode, durationSeconds: duration, pace: measuredPace, fillerCount: countFillers(capturedText), followUpCount: followUpIndex, notes, transcript, history: getHistory() }));
-      if (audioBlob?.size) form.set("audio", audioBlob, `presence-interview.${audioBlob.type.includes("mp4") ? "m4a" : "webm"}`);
       const response = await fetch("/api/evaluate", { method: "POST", body: form });
-      if (!response.ok) throw new Error("Evaluation unavailable");
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail?.error || `Evaluation failed (${response.status})`);
+      }
       const result = await response.json();
       setEvaluation(result.evaluation); saveHistory(result.evaluation); setEvaluationMessage("");
-    } catch { setEvaluationMessage("AI evaluation was unavailable. Showing local delivery signals instead."); }
+    } catch (error) { setEvaluationMessage(`AI evaluation was unavailable: ${error instanceof Error ? error.message : "Unknown error"}. Your recording remains on this Mac.`); }
     finally { setEvaluating(false); }
   }
   async function finishInterview() {
@@ -298,8 +301,8 @@ export default function Home() {
     recognitionRef.current?.stop?.();
     window.speechSynthesis?.cancel(); streamRef.current?.getTracks().forEach((track) => track.stop()); setStage("report");
     peerRef.current?.close(); setAiConnected(false);
-    const audioBlob = recorderStoppedRef.current ? await recorderStoppedRef.current : recordedAudioRef.current;
-    void requestEvaluation(duration, audioBlob);
+    if (recorderStoppedRef.current) await recorderStoppedRef.current;
+    void requestEvaluation(duration);
   }
 
   const userText = transcript.filter((entry) => entry.speaker === "You").map((entry) => entry.text).join(" ");
@@ -351,7 +354,7 @@ export default function Home() {
     <main className="report-shell">
       <header className="topbar report-topbar"><div className="brand"><span className="brand-mark">P</span><span>Presence</span></div><button className="text-button" onClick={() => { setStage("setup"); setNotes(""); }}>New interview</button></header>
       <section className="report-wrap">
-        <div className="report-intro"><span className="eyebrow">Interview complete</span><h1>{evaluating ? "Reviewing your interview…" : scoreLabel(overallScore)}</h1><p>{evaluation?.overallSummary ?? "Your local delivery signals are ready. The full AI review will appear here when evaluation completes."}</p>{testMode && <div className="test-mode-notice"><b>Upgrade test mode</b><span>This session was not added to your score or weakness history.</span></div>}{evaluationMessage && <div className="evaluation-notice">{evaluationMessage}</div>}</div>
+        <div className="report-intro"><span className="eyebrow">Interview complete</span><h1>{evaluating ? "Reviewing your interview…" : scoreLabel(overallScore)}</h1><p>{evaluation?.overallSummary ?? "Your local delivery signals are ready. The full AI review will appear here when evaluation completes."}</p>{testMode && <div className="test-mode-notice"><b>Upgrade test mode</b><span>This session was not added to your score or weakness history.</span></div>}{evaluationMessage && <div className="evaluation-notice">{evaluationMessage}{!evaluating && !evaluation && <button type="button" className="text-button" onClick={() => void requestEvaluation(lastEvaluationDuration || elapsedSeconds)}>Retry evaluation</button>}</div>}</div>
         <div className="score-hero"><div className="overall-score"><span>Overall</span><strong>{overallScore}</strong><small>/ 100</small></div><div className="score-split"><div><span>Delivery</span><b>{deliveryScore}</b><div className="score-track"><i style={{ width: `${deliveryScore}%` }} /></div><small>50% of overall</small></div><div><span>Product thinking</span><b>{productScore}</b><div className="score-track coral"><i style={{ width: `${productScore}%` }} /></div><small>50% of overall</small></div></div></div>
         <div className="report-grid">
           <section className="report-card focus-card"><span className="card-kicker">Highest-impact coaching</span><h2>{evaluation?.topImprovement ?? "Lead with the decision."}</h2><p>{evaluation?.strongestSignal ?? "Your reasoning becomes easier to follow when you state the choice first, then give the evidence."}</p><div className="practice-line"><span>Stronger delivery example</span><p>{evaluation?.improvedExample ?? "Give every major answer in two layers: decision first, then two reasons."}</p></div></section>

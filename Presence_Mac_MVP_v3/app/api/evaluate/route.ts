@@ -19,16 +19,7 @@ export async function POST(request: Request) {
   if (!apiKey) return Response.json({ available: false }, { status: 503 });
   const form = await request.formData();
   const session = JSON.parse(String(form.get("session") || "{}"));
-  const audio = form.get("audio");
-  let audioObservation = "No usable recording was supplied. Pronunciation confidence must be unavailable; do not invent pronunciation issues.";
-  if (audio instanceof File && audio.size > 0) {
-    try {
-      const tf = new FormData(); tf.set("file", audio, audio.name || "interview.webm"); tf.set("model", "gpt-4o-transcribe"); tf.set("prompt", "Transcribe faithfully in US English. Preserve filler words, false starts, repeated phrases, and grammatical errors. Do not silently correct the speaker.");
-      const tr = await fetch("https://api.openai.com/v1/audio/transcriptions", { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: tf });
-      const td = await tr.json();
-      if (tr.ok && td.text) audioObservation = `Audio-derived transcript (use for delivery, fillers, grammar, and conservative intelligibility observations):\n${td.text}`;
-    } catch { /* fall back to browser transcript */ }
-  }
+  const audioObservation = "The full recording stays on the candidate's Mac and was not uploaded. Use the live transcript and measured delivery signals. Pronunciation confidence must be unavailable; do not invent pronunciation issues.";
   const prior = Array.isArray(session.history) && session.history.length ? session.history.map((item: { date: string; style?: string; weaknesses: string[]; productScore: number; deliveryScore: number }) => `${item.date} (${item.style || "Product Sense"}): Product ${item.productScore}, Delivery ${item.deliveryScore}; ${item.weaknesses.join(", ")}`).join("\n") : "No prior sessions yet.";
   const stripeMode = session.style === "Stripe Product Sense";
   const productScoring = stripeMode
@@ -49,7 +40,7 @@ SCORING — exactly 50/50 overall:
 ${productScoring}
 DELIVERY & LANGUAGE (50 raw points): structure_waypointing 12; clarity_executive_communication 10; conversational_fluency 8; grammar 8; fillers_verbal_habits 6; pronunciation_intelligibility 6. Normalize to deliveryScore /100. Reward decision-first answers, signposting, concise logic, calm pauses, natural transitions, and collaborative interaction. Evaluate intelligibility, not accent conformity. Never penalize a non-native accent. Only name pronunciation issues when audio evidence supports a repeated or clear intelligibility problem; otherwise state insufficient evidence. Grammar patterns require short exact examples and corrections. Count fillers from audio-derived text when available.
 Every rubric item must use the exact IDs and max scores above. Evidence must identify something actually said or written. Weakness tags must be stable snake_case labels. Give a focused next-session plan.`;
-  const response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: "gpt-5.6", store: false, instructions: "You are a rigorous, fair Product Management interviewer and language coach. Ground every judgment in evidence and obey the scoring arithmetic.", input, text: { format: { type: "json_schema", name: "interview_evaluation", strict: true, schema: evaluationSchema } } }) });
+  const response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: "gpt-5.6-luna", store: false, reasoning: { effort: "low" }, instructions: "You are a rigorous, fair Product Management interviewer and language coach. Ground every judgment in evidence and obey the scoring arithmetic.", input, text: { format: { type: "json_schema", name: "interview_evaluation", strict: true, schema: evaluationSchema } } }) });
   const data = await response.json();
   if (!response.ok) return Response.json({ error: data?.error?.message || "Evaluation failed" }, { status: response.status });
   const outputText = data.output?.flatMap((item: { content?: Array<{ type: string; text?: string }> }) => item.content || []).find((part: { type: string }) => part.type === "output_text")?.text;
